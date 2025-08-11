@@ -1,4 +1,9 @@
+require("dotenv").config();
+
 const express = require("express");
+const { testConnection, syncDatabase } = require("./database");
+const Post = require("./models/Post");
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -10,7 +15,6 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: "10mb" }));
-
 app.use(express.urlencoded({ extended: true }));
 
 app.use((req, res, next) => {
@@ -28,93 +32,123 @@ app.use((req, res, next) => {
   }
 });
 
-const validatePostData = (req, res, next) => {
-  const { title, content, author } = req.body;
-
-  const errors = [];
-
-  if (!title || title.trim().length < 3) {
-    errors.push("Título deve ter pelo menos 3 caracteres");
-  }
-
-  if (!content || content.trim().length < 10) {
-    errors.push("Conteúdo deve ter pelo menos 10 caracteres");
-  }
-
-  if (!author || author.trim().length < 2) {
-    errors.push("Autor deve ter pelo menos 2 caracteres");
-  }
-
-  if (errors.length > 0) {
-    return res.status(400).json({
-      success: false,
-      message: "Dados inválidos",
-      errors: errors,
-    });
-  }
-
-  req.body.title = title.trim();
-  req.body.content = content.trim();
-  req.body.author = author.trim();
-
-  next();
-};
-
-let posts = [
-  {
-    id: 1,
-    title: "Primeiro Post",
-    content: "Este é o conteúdo do primeiro post",
-    author: "João",
-    cratedAt: new Date().toISOString(),
-  },
-  {
-    id: 2,
-    title: "Segundo Post",
-    content: "Este é o conteúdo do segundo post",
-    author: "Maria",
-    cratedAt: new Date().toISOString(),
-  },
-];
-
-//GET /posts - Listar todos os posts
-app.get("/posts", (req, res) => {
-  res.json({
-    success: true,
-    data: posts,
-    count: posts.length,
-  });
-});
-
-//GET /posts/:id - Buscar um post específico
-app.get("/posts/:id", (req, res) => {
-  const postId = parseInt(req.params.id);
-  const post = posts.find((p) => p.id === postId);
-
-  if (!post) {
-    return res.status(404).json({
-      success: false,
-      message: "Post não encotrado",
-    });
-  }
-  res.json({
-    success: true,
-    data: post,
-  });
-});
-
-app.post("/posts", validatePostData, (req, res, next) => {
+const validatePostData = async (req, res, next) => {
   try {
     const { title, content, author } = req.body;
 
-    const newPost = {
-      id: posts.length + 1,
+    const errors = [];
+
+    if (!title || title.trim().length < 3) {
+      errors.push("Título deve ter pelo menos 3 caracteres");
+    }
+
+    if (!content || content.trim().length < 10) {
+      errors.push("Conteúdo deve ter pelo menos 10 caracteres");
+    }
+
+    if (!author || author.trim().length < 2) {
+      errors.push("Autor deve ter pelo menos 2 caracteres");
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Dados inválidos",
+        errors: errors,
+      });
+    }
+
+    const tempPost = Post.build({
+      title: title.trim(),
+      content: content.trim(),
+      author: author.trim(),
+    });
+
+    await tempPost.validate();
+
+    req.body.title = title.trim();
+    req.body.content = content.trim();
+    req.body.author = author.trim();
+
+    next();
+  } catch (error) {
+    if (error.nome === "SequelizeValidationError") {
+      const errors = error.errors.map((err) => err.message);
+      return res.status(400).json({
+        success: false,
+        message: "Dados inválidos",
+        errors: errors,
+      });
+    }
+    next(error);
+  }
+};
+
+//GET /posts - Listar todos os posts
+app.get("/posts", async (req, res, next) => {
+  try {
+    const { author, published } = req.query;
+
+    let whereClause = {};
+
+    const posts = await Post.findAll({
+      where: whereClause,
+      order: [["created_at", "DESC"]],
+      attributes: { exclude: ["updated_at"] },
+    });
+
+    res.json({
+      success: true,
+      data: posts,
+      count: posts.length,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+//GET /posts/:id - Buscar um post específico
+app.get("/posts/:id", async (req, res, next) => {
+  try {
+    const postId = parseInt(req.params.id);
+
+    if (isNaN(postId)) {
+      return res.status(400).json({
+        success: false,
+        message: "ID inválido",
+      });
+    }
+
+    const post = await Post.findByPk(postId);
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: "Post não encotrado",
+      });
+    }
+
+    await post.incrementViews();
+
+    res.json({
+      success: true,
+      data: post,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+//Criar um novo post
+app.post("/posts", validatePostData, async (req, res, next) => {
+  try {
+    const { title, content, author } = req.body;
+
+    const newPost = await Post.create({
       title,
       content,
       author,
-      cratedAt: new Date().toISOString(),
-    };
-    posts.push(newPost);
+    });
 
     res.status(201).json({
       success: true,
@@ -127,30 +161,38 @@ app.post("/posts", validatePostData, (req, res, next) => {
 });
 
 //PUT /posts/:id - Atualizar um post
-app.put("/posts/:id", validatePostData, (req, res, next) => {
+app.put("/posts/:id", validatePostData, async (req, res, next) => {
   try {
     const postId = parseInt(req.params.id);
-    const postIndex = posts.findIndex((p) => p.id === postId);
 
-    if (postIndex === -1) {
+    if (isNaN(postId)) {
+      return res.status(400).json({
+        success: false,
+        message: "ID inválido",
+      });
+    }
+
+    const post = await Post.findByPk(postId);
+
+    if (!post) {
       return res.status(404).json({
         success: false,
         message: "Post não encontrado",
       });
     }
 
-    next();
+    const { title, content, author } = req.body;
 
-    const { title, content } = req.body;
-
-    posts[postIndex].title = title;
-    posts[postIndex].content = content;
-    posts[postIndex].updatedAt = new Date().toISOString();
+    await post.update({
+      title,
+      content,
+      author: author || post.author,
+    });
 
     res.json({
       success: true,
       message: "Post atualizado com sucesso!",
-      data: posts[postIndex],
+      data: post,
     });
   } catch (error) {
     next(error);
@@ -158,24 +200,68 @@ app.put("/posts/:id", validatePostData, (req, res, next) => {
 });
 
 //DELETE /posts/:id - Deletar um post
-app.delete("/posts/:id", (req, res) => {
-  const postId = parseInt(req.params.id);
-  const postIndex = posts.findIndex((p) => p.id === postId);
+app.delete("/posts/:id", async (req, res, next) => {
+  try {
+    const postId = parseInt(req.params.id);
+    if (isNaN(postId)) {
+      return res.status(400).json({
+        success: false,
+        message: "ID inválido",
+      });
+    }
 
-  if (postIndex === -1) {
-    return res.status(404).json({
-      success: false,
-      message: "Post não encontrado",
+    const post = await Post.findByPk(postId);
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: "Post não encontrado",
+      });
+    }
+
+    const postData = post.toJSON(); //para salvar os dados antes de deletar
+    await post.destroy();
+
+    res.json({
+      success: true,
+      message: "Post deletado com sucesso!",
+      data: postData,
     });
+  } catch (error) {
+    next(error);
   }
+});
 
-  const deletedPost = posts.splice(postIndex, 1)[0];
+//Estatísticas do blog
+app.get("/stats", async (req, res, next) => {
+  try {
+    const totalPosts = await Post.count();
+    const publishedPosts = await Post.count({ where: { published: true } });
+    const totalViews = (await Post.sum("views")) || 0;
 
-  res.json({
-    success: true,
-    message: "Post deletado com sucesso!",
-    data: deletedPost,
-  });
+    const topAuthors = await Post.findAll({
+      attributes: [
+        "author",
+        [Post.sequelize.fn("COUNT", Post.sequelize.col("id")), "post_count"],
+        [Post.sequelize.fn("SUM", Post.sequelize.col("views")), "total_views"],
+      ],
+      group: ["author"],
+      order: [[Post.sequelize.literal("post_count"), "DESC"]],
+      limit: 5,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        totalPosts,
+        publishedPosts,
+        totalViews,
+        topAuthors,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 //Rota de health check
@@ -184,6 +270,7 @@ app.get("/health", (req, res) => {
     success: true,
     message: "API do Blog funcionando!",
     timestamp: new Date().toISOString(),
+    database: "postgreSQL conectado",
   });
 });
 
@@ -198,12 +285,29 @@ app.use(/.*/, (req, res) => {
       "POST /posts",
       "PUT /posts/:id",
       "DELETE /posts/:id",
+      "GET /stats",
     ],
   });
 });
 
 app.use((error, req, res, next) => {
   console.error("Erro capturado:", error);
+
+  if (error.name === "SequelizeValidationError") {
+    const erros = error.errors.map((err) => err.message);
+    return res.status(400).json({
+      success: false,
+      message: "Dados inválidos",
+      errors: erros,
+    });
+  }
+
+  if (error.name === "SequelizeUniqueConstraintError") {
+    return res.status(400).json({
+      success: false,
+      message: "Violação de integridade referencial",
+    });
+  }
 
   if (error instanceof SyntaxError && error.status === 400 && "body" in error) {
     return res.status(400).json({
@@ -223,11 +327,24 @@ app.use((error, req, res, next) => {
 });
 
 //Iniciar o servidor
-app.listen(PORT, () => {
-  console.log(`Servidor iniciado na porta ${PORT}`);
-  console.log(`Acesse: http://localhost:${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Posts: http://localhost:${PORT}/posts`);
-});
+const starterServer = async () => {
+  try {
+    await testConnection();
+    await syncDatabase();
+
+    app.listen(PORT, () => {
+      console.log(`Servidor iniciado na porta ${PORT}`);
+      console.log(`Acesse: http://localhost:${PORT}`);
+      console.log(`Health check: http://localhost:${PORT}/health`);
+      console.log(`Posts: http://localhost:${PORT}/posts`);
+      console.log(`Stats: http://localhost:${PORT}/stats`);
+    });
+  } catch (error) {
+    console.error("Erro ao iniciar o servidor:", error);
+    process.exit(1);
+  }
+};
+
+starterServer();
 
 module.exports = app;
