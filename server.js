@@ -1,8 +1,15 @@
+"GET /auth/register", "POST /auth/login", "GET /auth/me", "PUT /auth/profile";
 require("dotenv").config();
 
 const express = require("express");
-const { testConnection, syncDatabase } = require("./database");
+const { testConnection, syncDatabase } = require("./config/database");
 const Post = require("./models/Post");
+const User = require("./models/User");
+const {
+  authenticate,
+  requireAdmin,
+  optionalAuth,
+} = require("./middlewares/auth");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,7 +26,7 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.header(
     "Access-Control-Allow-Headers",
     "Origin, X-Requested-With, Content-Type, Accept, Authorization"
@@ -84,6 +91,172 @@ const validatePostData = async (req, res, next) => {
   }
 };
 
+app.post("/auth/register", async (req, res, next) => {
+  try {
+    const { email, password, name } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Nome, email e senha são obrigatórios",
+      });
+    }
+
+    const existingUser = await User.findOne({
+      where: { email: email.toLowerCase() },
+    });
+
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: "Email já cadastrado",
+      });
+    }
+
+    //criar usuário
+    const newUser = await User.create({
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      password,
+    });
+
+    const token = newUser.generateJWT();
+
+    res.status(201).json({
+      success: true,
+      message: "Usuário criado com sucesso",
+      data: {
+        user: {
+          id: newUser.id,
+          name: newUser.name,
+          email: newUser.email,
+          role: newUser.role,
+        },
+        token,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+//login do usuário
+app.post("/auth/login", async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email e senha são obrigatórios",
+      });
+    }
+
+    const user = await User.findByEmail(email);
+
+    if (!user || !user.isActive) {
+      return res.status(401).json({
+        success: false,
+        message: "Email ou senha inválidos",
+      });
+    }
+
+    //verificar senha
+    const isPasswordValid = await user.checkPassword(password);
+
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: "Email ou senha inválidos",
+      });
+    }
+
+    await user.updateLastLogin();
+    const token = user.generateJWT();
+
+    res.json({
+      success: true,
+      message: "Login realizado com sucesso",
+      data: {
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          lastLogin: user.lastLogin,
+        },
+        token,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/auth/me", authenticate, async (req, res, next) => {
+  try {
+    res.json({
+      success: true,
+      data: {
+        id: req.user.id,
+        name: req.user.name,
+        email: req.user.email,
+        role: req.user.role,
+        lastLogin: req.user.lastLogin,
+        isActive: req.user.isActive,
+        createdAt: req.user.createdAt,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/auth/profile", authenticate, async (req, res, next) => {
+  try {
+    const { name, email } = req.body;
+
+    if (!name && !email) {
+      return res.status(400).json({
+        success: false,
+        message: "Por favor, forneça o nome e o e-mail",
+      });
+    }
+
+    const updateData = {};
+    if (name) updateData.name = name.trim();
+    if (email) updateData.email = email.toLowerCase().trim();
+
+    if (email && email !== req.user.email) {
+      const existingUser = await User.findOne({
+        where: { email: updateData.email },
+      });
+
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: "E-mail já cadastrado",
+        });
+      }
+    }
+
+    await req.user.update(updateData);
+
+    res.json({
+      success: true,
+      message: "Perfil atualizado com sucesso",
+      data: {
+        id: req.user.id,
+        name: req.user.name,
+        email: req.user.email,
+        role: req.user.role,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 //GET /posts - Listar todos os posts
 app.get("/posts", async (req, res, next) => {
   try {
@@ -140,7 +313,7 @@ app.get("/posts/:id", async (req, res, next) => {
 });
 
 //Criar um novo post
-app.post("/posts", validatePostData, async (req, res, next) => {
+app.post("/posts", authenticate, validatePostData, async (req, res, next) => {
   try {
     const { title, content, author } = req.body;
 
@@ -161,46 +334,51 @@ app.post("/posts", validatePostData, async (req, res, next) => {
 });
 
 //PUT /posts/:id - Atualizar um post
-app.put("/posts/:id", validatePostData, async (req, res, next) => {
-  try {
-    const postId = parseInt(req.params.id);
+app.put(
+  "/posts/:id",
+  authenticate,
+  validatePostData,
+  async (req, res, next) => {
+    try {
+      const postId = parseInt(req.params.id);
 
-    if (isNaN(postId)) {
-      return res.status(400).json({
-        success: false,
-        message: "ID inválido",
+      if (isNaN(postId)) {
+        return res.status(400).json({
+          success: false,
+          message: "ID inválido",
+        });
+      }
+
+      const post = await Post.findByPk(postId);
+
+      if (!post) {
+        return res.status(404).json({
+          success: false,
+          message: "Post não encontrado",
+        });
+      }
+
+      const { title, content, author } = req.body;
+
+      await post.update({
+        title,
+        content,
+        author: author || post.author,
       });
-    }
 
-    const post = await Post.findByPk(postId);
-
-    if (!post) {
-      return res.status(404).json({
-        success: false,
-        message: "Post não encontrado",
+      res.json({
+        success: true,
+        message: "Post atualizado com sucesso!",
+        data: post,
       });
+    } catch (error) {
+      next(error);
     }
-
-    const { title, content, author } = req.body;
-
-    await post.update({
-      title,
-      content,
-      author: author || post.author,
-    });
-
-    res.json({
-      success: true,
-      message: "Post atualizado com sucesso!",
-      data: post,
-    });
-  } catch (error) {
-    next(error);
   }
-});
+);
 
 //DELETE /posts/:id - Deletar um post
-app.delete("/posts/:id", async (req, res, next) => {
+app.delete("/posts/:id", authenticate, async (req, res, next) => {
   try {
     const postId = parseInt(req.params.id);
     if (isNaN(postId)) {
