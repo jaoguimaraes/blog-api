@@ -6,10 +6,16 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
+    "db:reset": "node -e \"require('./database').syncDatabase(true)\"",
     "test": "echo \"Testes serão adicionados depois\" && exit 1"
   },
   "keywords": [
-    "echo \"Testes serão adicionados depois\" && exit 1"
+    "node",
+    "express",
+    "api",
+    "blog",
+    "backend",
+    "postgresql"
   ],
   "author": "João Pedro",
   "license": "MIT",
